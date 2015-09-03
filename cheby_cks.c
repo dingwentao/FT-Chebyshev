@@ -369,7 +369,8 @@ static PetscErrorCode KSPSolve_Chebyshev(KSP ksp)
   PetscScalar	sumr1,sumr2,sumr3;
   Vec			CKPpk, CKPpkm1;
   PetscInt		CKPi,CKPk,CKPkp1,CKPkm1;
-  //PetscBool		flag1 = PETSC_TRUE, flag2 = PETSC_TRUE, flag3 = PETSC_TRUE;
+  PetscScalar	CKPck,CKPckm1;
+  PetscBool		flag1 = PETSC_TRUE,flag2 = PETSC_TRUE,flag3 = PETSC_TRUE,flag4 = PETSC_TRUE;
   PetscInt		pos;
   PetscScalar	v;
   PetscScalar	theta1 = 1.0e-6, theta2 = 1.0e-10;
@@ -470,16 +471,24 @@ static PetscErrorCode KSPSolve_Chebyshev(KSP ksp)
   /* Dingwen */	
   /* checksum coefficients initialization */
   PetscInt size;
-  ierr = VecGetSize(b,&size);	
+  PetscInt *index;
+  PetscScalar *v1,*v2,*v3;
+  ierr = VecGetSize(b,&size);
+  v1 	= (PetscScalar *)malloc(size*sizeof(PetscScalar));
+  v2 	= (PetscScalar *)malloc(size*sizeof(PetscScalar));
+  v3 	= (PetscScalar *)malloc(size*sizeof(PetscScalar));
+  index	= (PetscInt *)malloc(size*sizeof(PetscInt));
   for (i=0; i<size; i++)
   {
-	  v		= 1.0;
-	  ierr	= VecSetValues(C1,1,&i,&v,INSERT_VALUES);CHKERRQ(ierr);	
-	  v		= i+1.0;
-	  ierr 	= VecSetValues(C2,1,&i,&v,INSERT_VALUES);CHKERRQ(ierr);
-	  v		= 1/(i+1.0);
-	  ierr	= VecSetValues(C3,1,&i,&v,INSERT_VALUES);CHKERRQ(ierr);
-  }	
+	  index[i] = i;
+	  v1[i] = 1.0;
+	  v2[i] = i+1.0;
+	  v3[i] = 1/(i+1.0);
+  }
+  ierr	= VecSetValues(C1,size,index,v1,INSERT_VALUES);CHKERRQ(ierr);	
+  ierr 	= VecSetValues(C2,size,index,v2,INSERT_VALUES);CHKERRQ(ierr);
+  ierr	= VecSetValues(C3,size,index,v3,INSERT_VALUES);CHKERRQ(ierr);	
+
   d1 = 1.0;
   d2 = 2.0;
   d3 = 3.0;
@@ -529,8 +538,16 @@ static PetscErrorCode KSPSolve_Chebyshev(KSP ksp)
 			  k 	= CKPk;
 			  kp1	= CKPkp1;
 			  km1	= CKPkm1;
+			  c[k]	= CKPck;
+			  c[km1]= CKPckm1;
 			  ierr	= VecCopy(CKPpk,p[k]);CHKERRQ(ierr);
 			  ierr	= VecCopy(CKPpkm1,p[km1]);CHKERRQ(ierr);
+			  ierr = VecDot(C1,p[k],&CKSp1[k]);CHKERRQ(ierr);
+			  ierr = VecDot(C2,p[k],&CKSp2[k]);CHKERRQ(ierr);
+			  ierr = VecDot(C3,p[k],&CKSp3[k]);CHKERRQ(ierr);
+			  ierr = VecDot(C1,p[km1],&CKSp1[km1]);CHKERRQ(ierr);
+			  ierr = VecDot(C2,p[km1],&CKSp2[km1]);CHKERRQ(ierr);
+			  ierr = VecDot(C3,p[km1],&CKSp3[km1]);CHKERRQ(ierr);
 			  if (rank==0) printf ("Recovery end.\n");
 		}
 		else if (i%(itv_c*itv_d) == 0)
@@ -540,6 +557,8 @@ static PetscErrorCode KSPSolve_Chebyshev(KSP ksp)
 			CKPk	= k;
 			CKPkp1	= kp1;
 			CKPkm1	= km1;
+			CKPck	= c[k];
+			CKPckm1	= c[km1];  
 			ierr	= VecCopy(p[k],CKPpk);CHKERRQ(ierr);
 			ierr	= VecCopy(p[km1],CKPpkm1);CHKERRQ(ierr);
 		}
@@ -553,18 +572,159 @@ static PetscErrorCode KSPSolve_Chebyshev(KSP ksp)
 	
 	ierr = KSP_MatMult(ksp,Amat,p[k],r);CHKERRQ(ierr);          /*  r = b - Ap[k]    */
     ierr = VecAYPX(r,-1.0,b);CHKERRQ(ierr);
-	/* Dingwen */	/* MVM + VLO */
+	
+	/* Dingwen */
+	/* Inject an error to simulate cache errors */
+	if((i==90)&&(flag4))
+	  {
+		  pos 	= 200;
+		  v		= 1;
+		  ierr	= VecSetValue(r,pos,v,INSERT_VALUES);CHKERRQ(ierr);
+		  VecAssemblyBegin(r);
+		  VecAssemblyEnd(r);
+		  if (rank==0) printf ("Inject an error between MVM and Checksum update to simulate cache error at iteration-%d\n", i);
+		  flag4	= PETSC_FALSE;
+	  }
+
+	/* Checksum update of MVM + VLO */
 	ierr = VecDot(CKSAmat1, p[k], &CKSr1);CHKERRQ(ierr);
 	CKSr1 = CKSb1 - (CKSr1 + d1*CKSp1[k] + d2*CKSp2[k] + d3*CKSp3[k]);				/* Update checksum1(r) = checksum1(b) - (checksum1(A)p[k] + d1*checksum1(p[k]) + d2*checksum2(p[k]) + d3*checksum3(p[k]); */ 
 	ierr = VecDot(CKSAmat2, p[k], &CKSr2);CHKERRQ(ierr);
 	CKSr2 = CKSb2 - (CKSr2 + d2*CKSp1[k] + d3*CKSp2[k] + d1*CKSp3[k]);				/* Update checksum2(r) = checksum2(b) - (checksum2(A)p[k] + d2*checksum1(p[k]) + d3*checksum2(p[k]) + d1*checksum3(p[k]); */
 	ierr = VecDot(CKSAmat3, p[k], &CKSr3);CHKERRQ(ierr);
 	CKSr3 = CKSb3 - (CKSr3 + d3*CKSp1[k] + d1*CKSp2[k] + d2*CKSp3[k]);				/* Update checksum3(r) = checksum3(b) - (checksum3(A)p[k] + d3*checksum1(p[k]) + d1*checksum2(p[k]) + d2*checksum3(p[k]); */
-	/* Dingwen */
+
+	/* Inject an error */
+	if((i==30)&&(flag2))
+	{
+		pos 	= 100;
+		v		= 1000;
+		ierr	= VecSetValue(r,pos,v,INSERT_VALUES);CHKERRQ(ierr);
+		VecAssemblyBegin(r);
+		VecAssemblyEnd(r);
+		if (rank==0) printf ("Inject an error after MVM at iteration-%d\n", i);
+		flag2	= PETSC_FALSE;
+	}
 	
+	/* Inject errors */
+	if((i==70)&&(flag3))
+	{
+		pos 	= 100;
+		v		= 10000;
+		ierr	= VecSetValue(r,pos,v,INSERT_VALUES);CHKERRQ(ierr);
+		pos 	= 150;
+		v		= 200;
+		ierr	= VecSetValue(r,pos,v,INSERT_VALUES);CHKERRQ(ierr);
+		VecAssemblyBegin(r);
+		VecAssemblyEnd(r);
+		if (rank==0) printf ("Inject errors after MVM at iteration-%d\n", i);
+		flag3	= PETSC_FALSE;
+	}
+
+	/* Inner Protection */
+	PetscScalar delta1,delta2,delta3;			  
+	ierr = VecDot(C1,r,&sumr1);CHKERRQ(ierr);
+	ierr = VecDot(C2,r,&sumr2);CHKERRQ(ierr);
+	ierr = VecDot(C3,r,&sumr3);CHKERRQ(ierr);
+	delta1 = sumr1 - CKSr1;
+	delta2 = sumr2 - CKSr2;
+	delta3 = sumr3 - CKSr3;
+	if (PetscAbsScalar(delta1) > theta1)
+	{
+		ierr = VecDot(C1,p[k],&sump1[k]);CHKERRQ(ierr);
+		if (PetscAbsScalar(CKSp1[k]-sump1[k]) > theta1)
+		{
+			if (rank==0) printf ("Errors occur before MVM\n");
+			if (rank==0) printf ("Recovery start...\n");
+			if (rank==0) printf ("Rollback from iteration-%d to iteration-%d\n",i,CKPi);
+			i 	= CKPi;
+			k 	= CKPk;
+			kp1	= CKPkp1;
+			km1	= CKPkm1;
+			c[k]	= CKPck;
+			c[km1]= CKPckm1;
+			ierr	= VecCopy(CKPpk,p[k]);CHKERRQ(ierr);
+			ierr	= VecCopy(CKPpkm1,p[km1]);CHKERRQ(ierr);
+			ierr = VecDot(C1,p[k],&CKSp1[k]);CHKERRQ(ierr);
+			ierr = VecDot(C2,p[k],&CKSp2[k]);CHKERRQ(ierr);
+			ierr = VecDot(C3,p[k],&CKSp3[k]);CHKERRQ(ierr);
+			ierr = VecDot(C1,p[km1],&CKSp1[km1]);CHKERRQ(ierr);
+			ierr = VecDot(C2,p[km1],&CKSp2[km1]);CHKERRQ(ierr);
+			ierr = VecDot(C3,p[km1],&CKSp3[km1]);CHKERRQ(ierr);
+			if (rank==0) printf ("Recovery end.\n");
+			
+			c[kp1] = 2.0*mu*c[k] - c[km1];
+			omega  = omegaprod*c[k]/c[kp1];
+			ierr = KSP_MatMult(ksp,Amat,p[k],r);CHKERRQ(ierr);          /*  r = b - Ap[k]    */
+			ierr = VecAYPX(r,-1.0,b);CHKERRQ(ierr);
+			/* Dingwen */	/* MVM + VLO */
+			ierr = VecDot(CKSAmat1, p[k], &CKSr1);CHKERRQ(ierr);
+			CKSr1 = CKSb1 - (CKSr1 + d1*CKSp1[k] + d2*CKSp2[k] + d3*CKSp3[k]);				/* Update checksum1(r) = checksum1(b) - (checksum1(A)p[k] + d1*checksum1(p[k]) + d2*checksum2(p[k]) + d3*checksum3(p[k]); */ 
+			ierr = VecDot(CKSAmat2, p[k], &CKSr2);CHKERRQ(ierr);
+			CKSr2 = CKSb2 - (CKSr2 + d2*CKSp1[k] + d3*CKSp2[k] + d1*CKSp3[k]);				/* Update checksum2(r) = checksum2(b) - (checksum2(A)p[k] + d2*checksum1(p[k]) + d3*checksum2(p[k]) + d1*checksum3(p[k]); */
+			ierr = VecDot(CKSAmat3, p[k], &CKSr3);CHKERRQ(ierr);
+			CKSr3 = CKSb3 - (CKSr3 + d3*CKSp1[k] + d1*CKSp2[k] + d2*CKSp3[k]);				/* Update checksum3(r) = checksum3(b) - (checksum3(A)p[k] + d3*checksum1(p[k]) + d1*checksum2(p[k]) + d2*checksum3(p[k]); */
+			}
+			else{
+			  if (PetscAbsScalar(1.0-(delta2*delta3)/(delta1*delta1)) > theta2)
+			  {
+			  /* Rollback and Recovery */
+			  if (rank==0) printf ("Multiple errors in output vector of MVM\n");
+			  if (rank==0) printf ("Recovery start...\n");
+			  if (rank==0) printf ("Rollback from iteration-%d to iteration-%d\n",i,CKPi);
+			  i 	= CKPi;
+			  k 	= CKPk;
+			  kp1	= CKPkp1;
+			  km1	= CKPkm1;
+			  c[k]	= CKPck;
+			  c[km1]= CKPckm1;
+			  ierr	= VecCopy(CKPpk,p[k]);CHKERRQ(ierr);
+			  ierr	= VecCopy(CKPpkm1,p[km1]);CHKERRQ(ierr);
+			  ierr = VecDot(C1,p[k],&CKSp1[k]);CHKERRQ(ierr);
+			  ierr = VecDot(C2,p[k],&CKSp2[k]);CHKERRQ(ierr);
+			  ierr = VecDot(C3,p[k],&CKSp3[k]);CHKERRQ(ierr);
+			  ierr = VecDot(C1,p[km1],&CKSp1[km1]);CHKERRQ(ierr);
+			  ierr = VecDot(C2,p[km1],&CKSp2[km1]);CHKERRQ(ierr);
+			  ierr = VecDot(C3,p[km1],&CKSp3[km1]);CHKERRQ(ierr);
+			  if (rank==0) printf ("Recovery end.\n");
+			  
+			  /* Rollback to beginning of iteration */
+			  c[kp1] = 2.0*mu*c[k] - c[km1];
+			  omega  = omegaprod*c[k]/c[kp1];
+
+			  ierr = KSP_MatMult(ksp,Amat,p[k],r);CHKERRQ(ierr);          /*  r = b - Ap[k]    */
+			  ierr = VecAYPX(r,-1.0,b);CHKERRQ(ierr);
+			  	/* Dingwen */	/* MVM + VLO */
+				ierr = VecDot(CKSAmat1, p[k], &CKSr1);CHKERRQ(ierr);
+				CKSr1 = CKSb1 - (CKSr1 + d1*CKSp1[k] + d2*CKSp2[k] + d3*CKSp3[k]);				/* Update checksum1(r) = checksum1(b) - (checksum1(A)p[k] + d1*checksum1(p[k]) + d2*checksum2(p[k]) + d3*checksum3(p[k]); */ 
+				ierr = VecDot(CKSAmat2, p[k], &CKSr2);CHKERRQ(ierr);
+				CKSr2 = CKSb2 - (CKSr2 + d2*CKSp1[k] + d3*CKSp2[k] + d1*CKSp3[k]);				/* Update checksum2(r) = checksum2(b) - (checksum2(A)p[k] + d2*checksum1(p[k]) + d3*checksum2(p[k]) + d1*checksum3(p[k]); */
+				ierr = VecDot(CKSAmat3, p[k], &CKSr3);CHKERRQ(ierr);
+				CKSr3 = CKSb3 - (CKSr3 + d3*CKSp1[k] + d1*CKSp2[k] + d2*CKSp3[k]);				/* Update checksum3(r) = checksum3(b) - (checksum3(A)p[k] + d3*checksum1(p[k]) + d1*checksum2(p[k]) + d2*checksum3(p[k]); */
+			  }
+			  else{
+				  if (rank == 0) printf ("Locate and correct right away\n");
+				  VecScatter	ctx;
+				  Vec			r_SEQ;
+				  PetscScalar	*r_ARR;
+				  VecScatterCreateToAll(r,&ctx,&r_SEQ);
+				  VecScatterBegin(ctx,r,r_SEQ,INSERT_VALUES,SCATTER_FORWARD);
+				  VecScatterEnd(ctx,r,r_SEQ,INSERT_VALUES,SCATTER_FORWARD);
+				  VecGetArray(r_SEQ,&r_ARR);
+				  pos	= rint(delta2/delta1) - 1;
+				  v		= r_ARR[pos];
+				  v		= v - delta1;
+				  ierr	= VecSetValues(r,1,&pos,&v,INSERT_VALUES);CHKERRQ(ierr);
+				  if (rank==0) printf ("Correct an error in output vector of MVM at iteration-%d\n", i);
+				  VecDestroy(&r_SEQ);
+				  VecScatterDestroy(&ctx);
+			  }
+		  }
+		}
+		/* Dingwen */
+
 	ierr = KSP_PCApply(ksp,r,p[kp1]);CHKERRQ(ierr);             /*  p[kp1] = B^{-1}r  */
-    ksp->vec_sol = p[k];
-	
+    ksp->vec_sol = p[k];	
 	/* Dingwen */
 	ierr = VecDot(C1,p[kp1],&CKSp1[kp1]);CHKERRQ(ierr);				/* Update checksum1(p[kp1]) */
 	ierr = VecDot(C2,p[kp1],&CKSp2[kp1]);CHKERRQ(ierr);				/* Update checksum2(p[kp1]) */
@@ -597,11 +757,28 @@ static PetscErrorCode KSPSolve_Chebyshev(KSP ksp)
 	CKSp3[kp1] = (1.0-omega)*CKSp3[km1] + omega*CKSp3[k] + omega*Gamma*scale*CKSp3[kp1];
 	/* Dingwen */
 
+	/* Dingwen */
+	/* Inject error */
+	if ((i==50)&&(flag1))
+	{
+		pos		= 100;
+		v	 	= -1;
+		ierr	= VecSetValues(p[kp1],1,&pos,&v,INSERT_VALUES);CHKERRQ(ierr);
+		ierr	= VecAssemblyBegin(p[kp1]);CHKERRQ(ierr);
+		ierr	= VecAssemblyEnd(p[kp1]);CHKERRQ(ierr);  
+		flag1	= PETSC_FALSE;
+		if (rank==0)printf ("Inject an error at the end of iteration-%d\n", i);
+	}
+	/* Dingwen */
+
     ktmp = km1;
     km1  = k;
     k    = kp1;
     kp1  = ktmp;
   }
+  if (rank==0)
+	  printf ("Number of iterations without rollback = %d\n", i+1);
+
   if (!ksp->reason) {
     if (ksp->normtype != KSP_NORM_NONE) {
       ierr = KSP_MatMult(ksp,Amat,p[k],r);CHKERRQ(ierr);       /*  r = b - Ap[k]    */
@@ -647,36 +824,36 @@ static PetscErrorCode KSPSolve_Chebyshev(KSP ksp)
     ierr = VecCopy(p[k],sol_orig);CHKERRQ(ierr);
   }
   
-  /* Dingwen */
-  for (i=0;i<3;i++)
-  {
-	ierr = VecDot(C1,p[i],&sump1[i]);CHKERRQ(ierr);
-    ierr = VecDot(C2,p[i],&sump2[i]);CHKERRQ(ierr);
-    ierr = VecDot(C3,p[i],&sump3[i]);CHKERRQ(ierr);
+  // /* Dingwen */
+  // for (i=0;i<3;i++)
+  // {
+	// ierr = VecDot(C1,p[i],&sump1[i]);CHKERRQ(ierr);
+    // ierr = VecDot(C2,p[i],&sump2[i]);CHKERRQ(ierr);
+    // ierr = VecDot(C3,p[i],&sump3[i]);CHKERRQ(ierr);
     
-  }
-  ierr = VecDot(C1,r,&sumr1);CHKERRQ(ierr);
-  ierr = VecDot(C2,r,&sumr2);CHKERRQ(ierr);
-  ierr = VecDot(C3,r,&sumr3);CHKERRQ(ierr);
-  if (rank==0)
-  {
-	  for (i=0;i<3;i++)
-	  {
-		  printf ("sum1 of p[%d] = %f\n", i, sump1[i]);
-		  printf ("checksum1(p[%d]) = %f\n", i, CKSp1[i]);
-		  printf ("sum2 of p[%d] = %f\n", i, sump2[i]);
-		  printf ("checksum2(p[%d]) = %f\n", i, CKSp2[i]);
-		  printf ("sum3 of p[%d] = %f\n", i, sump3[i]);
-		  printf ("checksum3(p[%d]) = %f\n", i, CKSp3[i]);
-	  }
-	  printf ("sum1 of r = %f\n", sumr1);
-	  printf ("checksum1(r) = %f\n", CKSr1);
-	  printf ("sum2 of r = %f\n", sumr2);
-	  printf ("checksum2(r) = %f\n", CKSr2);
-	  printf ("sum3 of r = %f\n", sumr3);
-	  printf ("checksum3(r) = %f\n", CKSr3);
-  }
-  /* Dingwen */
+  // }
+  // ierr = VecDot(C1,r,&sumr1);CHKERRQ(ierr);
+  // ierr = VecDot(C2,r,&sumr2);CHKERRQ(ierr);
+  // ierr = VecDot(C3,r,&sumr3);CHKERRQ(ierr);
+  // if (rank==0)
+  // {
+	  // for (i=0;i<3;i++)
+	  // {
+		  // printf ("sum1 of p[%d] = %f\n", i, sump1[i]);
+		  // printf ("checksum1(p[%d]) = %f\n", i, CKSp1[i]);
+		  // printf ("sum2 of p[%d] = %f\n", i, sump2[i]);
+		  // printf ("checksum2(p[%d]) = %f\n", i, CKSp2[i]);
+		  // printf ("sum3 of p[%d] = %f\n", i, sump3[i]);
+		  // printf ("checksum3(p[%d]) = %f\n", i, CKSp3[i]);
+	  // }
+	  // printf ("sum1 of r = %f\n", sumr1);
+	  // printf ("checksum1(r) = %f\n", CKSr1);
+	  // printf ("sum2 of r = %f\n", sumr2);
+	  // printf ("checksum2(r) = %f\n", CKSr2);
+	  // printf ("sum3 of r = %f\n", sumr3);
+	  // printf ("checksum3(r) = %f\n", CKSr3);
+  // }
+  // /* Dingwen */
 
   PetscFunctionReturn(0);
 }
